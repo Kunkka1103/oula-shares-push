@@ -11,11 +11,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus/push"
 
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
 )
 
+// 命令行参数
 var (
-	// 命令行参数
 	mysqlDSN     = flag.String("mysqlDSN", "", "MySQL DSN, e.g. user:password@tcp(host:3306)/ops_db")
 	pushGateway  = flag.String("pushGateway", "http://localhost:9091", "Prometheus Pushgateway URL")
 	intervalMins = flag.Int("interval", 5, "Check interval in minutes")
@@ -42,7 +41,7 @@ func main() {
 		log.Panicln("Both mysqlDSN and pushGateway parameters are required.")
 	}
 
-	// 初始化MySQL连接
+	// 初始化 MySQL 连接
 	mysqlDB, err := sql.Open("mysql", *mysqlDSN)
 	if err != nil {
 		log.Fatalf("Failed to open MySQL connection: %v", err)
@@ -54,13 +53,13 @@ func main() {
 		log.Fatalf("Failed to ping MySQL: %v", err)
 	}
 
-	// 程序启动时，从 shares_epoch_counts 中获取每个项目的最新进度
+	// 启动时，从 shares_epoch_counts 表中获取每个链的最新高度
 	lastPushed, err := loadLastPushedEpochs(mysqlDB)
 	if err != nil {
 		log.Fatalf("Failed to load last pushed epochs: %v", err)
 	}
 
-	log.Printf("Startup - lastPushed epochs: %+v\n", lastPushed)
+	log.Printf("Startup - Initial last pushed epochs: %+v\n", lastPushed)
 
 	// 定时器
 	ticker := time.NewTicker(time.Duration(*intervalMins) * time.Minute)
@@ -80,7 +79,7 @@ func main() {
 
 // loadLastPushedEpochs 从 shares_epoch_counts 表中加载每个链的最大 epoch
 func loadLastPushedEpochs(db *sql.DB) (map[string]int64, error) {
-	query := `SELECT chain, MAX(epoch) FROM shares_epoch_counts GROUP BY chain`
+	query := `SELECT chain, MAX(epoch) as max_epoch FROM shares_epoch_counts GROUP BY chain`
 	rows, err := db.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query shares_epoch_counts: %w", err)
@@ -90,12 +89,12 @@ func loadLastPushedEpochs(db *sql.DB) (map[string]int64, error) {
 	lastPushed := make(map[string]int64)
 	for rows.Next() {
 		var chain string
-		var epoch sql.NullInt64
-		if err := rows.Scan(&chain, &epoch); err != nil {
+		var maxEpoch sql.NullInt64
+		if err := rows.Scan(&chain, &maxEpoch); err != nil {
 			return nil, fmt.Errorf("failed to scan row: %w", err)
 		}
-		if epoch.Valid {
-			lastPushed[chain] = epoch.Int64
+		if maxEpoch.Valid {
+			lastPushed[chain] = maxEpoch.Int64
 		} else {
 			lastPushed[chain] = 0
 		}
@@ -108,104 +107,119 @@ func loadLastPushedEpochs(db *sql.DB) (map[string]int64, error) {
 
 // pushUpdatedShareCounts 检查并推送新增的 share_count
 func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int64) error {
-	// 1. 获取每个链的最新 epoch
-	query := `SELECT chain, MAX(epoch) FROM shares_epoch_counts GROUP BY chain`
+	// 获取每个链的最新 epoch
+	query := `SELECT chain, MAX(epoch) as max_epoch FROM shares_epoch_counts GROUP BY chain`
 	rows, err := db.Query(query)
 	if err != nil {
 		return fmt.Errorf("failed to query latest epochs: %w", err)
 	}
 	defer rows.Close()
 
-	currentMax := make(map[string]int64)
+	type ChainEpoch struct {
+		Chain    string
+		MaxEpoch int64
+	}
+
+	var chains []ChainEpoch
 	for rows.Next() {
 		var chain string
-		var epoch sql.NullInt64
-		if err := rows.Scan(&chain, &epoch); err != nil {
+		var maxEpoch sql.NullInt64
+		if err := rows.Scan(&chain, &maxEpoch); err != nil {
 			log.Printf("Failed to scan row: %v", err)
 			continue
 		}
-		if epoch.Valid {
-			currentMax[chain] = epoch.Int64
-		} else {
-			currentMax[chain] = 0
+		if maxEpoch.Valid {
+			chains = append(chains, ChainEpoch{Chain: chain, MaxEpoch: maxEpoch.Int64})
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("rows iteration error: %w", err)
 	}
 
-	// 2. 对每个链，比较并推送新增的 epochs
-	for chain, newMaxEpoch := range currentMax {
-		lastEpoch, exists := lastPushed[chain]
+	// 遍历每个链
+	for _, ce := range chains {
+		lastEpoch, exists := lastPushed[ce.Chain]
 		if !exists {
 			lastEpoch = 0
 		}
+		currentMax := ce.MaxEpoch
 
-		if newMaxEpoch <= lastEpoch {
-			log.Printf("[%s] No new epoch. lastPushed=%d, currentMax=%d\n", chain, lastEpoch, newMaxEpoch)
+		if currentMax <= lastEpoch {
+			log.Printf("[%s] No new epoch. lastPushed=%d, currentMax=%d\n", ce.Chain, lastEpoch, currentMax)
 			continue
 		}
 
-		// 3. 获取新增的 epochs
-		// 为了简化，不使用 generate_series，直接从 MySQL 表中查询已有的 epochs
-		queryNew := `SELECT epoch, share_count FROM shares_epoch_counts WHERE chain = ? AND epoch > ? ORDER BY epoch ASC`
-		rowsNew, err := db.Query(queryNew, chain, lastEpoch)
+		// 定义要推送的范围: [lastEpoch+1, currentMax]
+		start := lastEpoch + 1
+		end := currentMax
+
+		// 查询需要推送的 epochs 及其 share_count
+		shareCounts, err := getShareCounts(db, ce.Chain, start, end)
 		if err != nil {
-			log.Printf("[%s] Failed to query new epochs: %v\n", chain, err)
+			log.Printf("Failed to get share counts for chain=%s: %v\n", ce.Chain, err)
 			continue
 		}
 
-		var epochsToPush []EpochData
-		for rowsNew.Next() {
-			var epoch int64
-			var shareCount int64
-			if err := rowsNew.Scan(&epoch, &shareCount); err != nil {
-				log.Printf("[%s] Failed to scan epoch data: %v\n", chain, err)
-				continue
-			}
-			epochsToPush = append(epochsToPush, EpochData{
-				Epoch:      epoch,
-				ShareCount: shareCount,
-			})
+		// 获取 share_count for latest epoch
+		latestShareCount, exists := shareCounts[end]
+		if !exists {
+			latestShareCount = 0
 		}
-		if err := rowsNew.Err(); err != nil {
-			log.Printf("[%s] Rows iteration error: %v\n", chain, err)
-			rowsNew.Close()
-			continue
-		}
-		rowsNew.Close()
 
-		// 4. 推送每个新增的 epoch
-		for _, epochData := range epochsToPush {
-			// 设置指标
-			shareCountMetric.WithLabelValues(chain).Set(float64(epochData.ShareCount))
+		// 如果最新 epoch 的 share_count !=0，推送
+		if latestShareCount != 0 {
+			// 设置metric
+			shareCountMetric.WithLabelValues(ce.Chain).Set(float64(latestShareCount))
 
-			// 定义 job 和 instance 标签
-			job := fmt.Sprintf("shares_monitor_%s", chain)
-			instance := fmt.Sprintf("epoch_%d", epochData.Epoch)
+			// 定义唯一的 job 和 instance
+			job := fmt.Sprintf("shares_monitor_%s_epoch_%d", ce.Chain, end)
+			instance := fmt.Sprintf("epoch_%d", end)
 
 			// 推送到 Pushgateway
-			err := push.New(pushGW, job).
-				Grouping("instance", instance).
+			err = push.New(pushGW, job).
 				Collector(shareCountMetric).
+				Grouping("instance", instance).
 				Push()
 			if err != nil {
-				log.Printf("[%s] Failed to push epoch=%d: %v\n", chain, epochData.Epoch, err)
+				log.Printf("Failed to push share_count for chain=%s, epoch=%d: %v", ce.Chain, end, err)
 				continue
 			}
 
-			log.Printf("[%s] Pushed epoch=%d with share_count=%d\n", chain, epochData.Epoch, epochData.ShareCount)
-
-			// 更新 lastPushed
-			lastPushed[chain] = epochData.Epoch
+			log.Printf("Pushed share_count for chain=%s, epoch=%d: %d", ce.Chain, end, latestShareCount)
+		} else {
+			log.Printf("Latest epoch share_count is 0 for chain=%s, epoch=%d. Not pushing.", ce.Chain, end)
 		}
+
+		// 更新 lastPushed
+		lastPushed[ce.Chain] = end
 	}
 
 	return nil
 }
 
-// EpochData 结构体表示一个 epoch 的数据
-type EpochData struct {
-	Epoch      int64
-	ShareCount int64
+// getShareCounts 查询指定链在[start, end]范围内的所有 epoch 的 share_count
+func getShareCounts(db *sql.DB, chain string, start, end int64) (map[int64]int64, error) {
+	query := `
+        SELECT epoch, share_count
+        FROM shares_epoch_counts
+        WHERE chain = ? AND epoch BETWEEN ? AND ?
+    `
+	rows, err := db.Query(query, chain, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query share counts: %w", err)
+	}
+	defer rows.Close()
+
+	shareCounts := make(map[int64]int64)
+	for rows.Next() {
+		var epoch, count int64
+		if err := rows.Scan(&epoch, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan row: %w", err)
+		}
+		shareCounts[epoch] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration error: %w", err)
+	}
+	return shareCounts, nil
 }
