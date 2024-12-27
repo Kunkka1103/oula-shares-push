@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,17 +23,25 @@ var (
 
 // Metrics定义
 var (
-	shareCountMetric = prometheus.NewGaugeVec(
+	sharesEpochCount = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "shares_epoch_count",
 			Help: "Number of shares per epoch",
 		},
 		[]string{"chain"},
 	)
+	sharesLatestNonZero = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "shares_latest_nonzero",
+			Help: "Share count of the latest epoch if not zero",
+		},
+		[]string{"chain"},
+	)
 )
 
 func init() {
-	prometheus.MustRegister(shareCountMetric)
+	prometheus.MustRegister(sharesEpochCount)
+	prometheus.MustRegister(sharesLatestNonZero)
 }
 
 func main() {
@@ -66,13 +75,19 @@ func main() {
 	defer ticker.Stop()
 
 	log.Printf("Starting push loop with interval = %d minute(s)\n", *intervalMins)
+
+	// 使用互斥锁保护 lastPushed 映射
+	var mu sync.Mutex
+
 	for {
 		select {
 		case <-ticker.C:
+			mu.Lock()
 			err := pushUpdatedShareCounts(mysqlDB, *pushGateway, lastPushed)
 			if err != nil {
 				log.Printf("Error during pushUpdatedShareCounts: %v\n", err)
 			}
+			mu.Unlock()
 		}
 	}
 }
@@ -168,30 +183,60 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 
 		// 如果最新 epoch 的 share_count !=0，推送
 		if latestShareCount != 0 {
-			// 设置metric
-			shareCountMetric.WithLabelValues(ce.Chain).Set(float64(latestShareCount))
+			// 设置 shares_latest_nonzero
+			sharesLatestNonZero.WithLabelValues(ce.Chain).Set(float64(latestShareCount))
 
 			// 定义唯一的 job 和 instance
-			job := fmt.Sprintf("shares_monitor_%s_epoch_%d", ce.Chain, end)
-			instance := fmt.Sprintf("epoch_%d", end)
+			job := fmt.Sprintf("shares_monitor_%s_latest_nonzero", ce.Chain)
+			instance := fmt.Sprintf("latest_epoch_%d", end)
 
 			// 推送到 Pushgateway
 			err = push.New(pushGW, job).
-				Collector(shareCountMetric).
+				Collector(sharesLatestNonZero).
 				Grouping("instance", instance).
 				Push()
 			if err != nil {
-				log.Printf("Failed to push share_count for chain=%s, epoch=%d: %v", ce.Chain, end, err)
+				log.Printf("Failed to push shares_latest_nonzero for chain=%s, epoch=%d: %v", ce.Chain, end, err)
 				continue
 			}
 
-			log.Printf("Pushed share_count for chain=%s, epoch=%d: %d", ce.Chain, end, latestShareCount)
-		} else {
-			log.Printf("Latest epoch share_count is 0 for chain=%s, epoch=%d. Not pushing.", ce.Chain, end)
+			log.Printf("Pushed shares_latest_nonzero for chain=%s, epoch=%d: %d", ce.Chain, end, latestShareCount)
 		}
 
-		// 更新 lastPushed
-		lastPushed[ce.Chain] = end
+		// 遍历范围内的每个 epoch 并推送 share_count
+		for epoch := start; epoch <= end; epoch++ {
+			shareCount, exists := shareCounts[epoch]
+			if !exists {
+				shareCount = 0
+			}
+
+			// 仅推送 share_count 不为0
+			if shareCount == 0 {
+				continue
+			}
+
+			// 设置 shares_epoch_count
+			sharesEpochCount.WithLabelValues(ce.Chain).Set(float64(shareCount))
+
+			// 定义唯一的 job 和 instance
+			job := fmt.Sprintf("shares_monitor_%s_epoch_%d", ce.Chain, epoch)
+			instance := fmt.Sprintf("epoch_%d", epoch)
+
+			// 推送到 Pushgateway
+			err = push.New(pushGW, job).
+				Collector(sharesEpochCount).
+				Grouping("instance", instance).
+				Push()
+			if err != nil {
+				log.Printf("Failed to push shares_epoch_count for chain=%s, epoch=%d: %v", ce.Chain, epoch, err)
+				continue
+			}
+
+			log.Printf("Pushed shares_epoch_count for chain=%s, epoch=%d: %d", ce.Chain, epoch, shareCount)
+
+			// 更新 lastPushed
+			lastPushed[ce.Chain] = epoch
+		}
 	}
 
 	return nil
