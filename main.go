@@ -188,12 +188,11 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 
 			// 定义唯一的 job 和 instance
 			job := fmt.Sprintf("shares_monitor_%s_latest_nonzero", ce.Chain)
-			instance := fmt.Sprintf("latest_epoch_%d", end)
+			//instance := fmt.Sprintf("latest_epoch_%d", end)
 
 			// 推送到 Pushgateway
 			err = push.New(pushGW, job).
 				Collector(sharesLatestNonZero).
-				Grouping("instance", instance).
 				Push()
 			if err != nil {
 				log.Printf("Failed to push shares_latest_nonzero for chain=%s, epoch=%d: %v", ce.Chain, end, err)
