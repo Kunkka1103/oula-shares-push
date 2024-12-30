@@ -22,27 +22,27 @@ var (
 )
 
 // Metrics定义
-var (
-	sharesEpochCount = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "shares_epoch_count",
-			Help: "Number of shares per epoch",
-		},
-		[]string{"chain"},
-	)
-	sharesLatestNonZero = prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "shares_latest_nonzero",
-			Help: "Share count of the latest epoch if not zero",
-		},
-		[]string{"chain"},
-	)
-)
+//var (
+//	sharesEpochCount = prometheus.NewGaugeVec(
+//		prometheus.GaugeOpts{
+//			Name: "shares_epoch_count",
+//			Help: "Number of shares per epoch",
+//		},
+//		[]string{"chain"},
+//	)
+//	sharesLatestNonZero = prometheus.NewGaugeVec(
+//		prometheus.GaugeOpts{
+//			Name: "shares_latest_nonzero",
+//			Help: "Share count of the latest epoch if not zero",
+//		},
+//		[]string{"chain"},
+//	)
+//)
 
-func init() {
-	prometheus.MustRegister(sharesEpochCount)
-	prometheus.MustRegister(sharesLatestNonZero)
-}
+//func init() {
+//	prometheus.MustRegister(sharesEpochCount)
+//	prometheus.MustRegister(sharesLatestNonZero)
+//}
 
 func main() {
 	flag.Parse()
@@ -185,15 +185,13 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 		if latestShareCount != 0 {
 			// 设置 shares_latest_nonzero
 			gaugeLatest := prometheus.NewGauge(prometheus.GaugeOpts{
-				Name: "shares_latest_nonzero",
-				Help: "Share count of the latest epoch if not zero",
-				ConstLabels: prometheus.Labels{
-					"chain": ce.Chain,
-				},
+				Name:        fmt.Sprintf("%s_shares_latest_nonzero", ce.Chain),
+				Help:        "Share count of the latest epoch if not zero",
+				//ConstLabels: prometheus.Labels{},
 			})
 			gaugeLatest.Set(float64(latestShareCount))
 
-			// 定义唯一的 job 和 instance
+			// 定义唯一的 job
 			job := ce.Chain
 
 			// 推送到 Pushgateway
@@ -222,15 +220,13 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 
 			// 设置 shares_epoch_count
 			gaugeEpoch := prometheus.NewGauge(prometheus.GaugeOpts{
-				Name: "shares_epoch_count",
-				Help: "Number of shares per epoch",
-				ConstLabels: prometheus.Labels{
-					"chain": ce.Chain,
-				},
+				Name:        fmt.Sprintf("%s_shares_epoch_count", ce.Chain),
+				Help:        "Number of shares per epoch",
+				//ConstLabels: prometheus.Labels{},
 			})
 			gaugeEpoch.Set(float64(shareCount))
 
-			// 定义唯一的 job 和 instance
+			// 定义唯一的 job
 			job := ce.Chain
 
 			// 推送到 Pushgateway
