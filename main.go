@@ -46,26 +46,32 @@ func main() {
 
 		// 推送每个链的分享计数
 		for chain, epochs := range shareCounts {
+			// 获取该链最大不为零的高度
+			maxHeight, exists := maxHeights[chain]
+			if !exists {
+				log.Printf("No max height found for chain %s\n", chain)
+				continue
+			}
+
 			// 推送 share_epoch_count
 			for epoch, shareCount := range epochs {
+				// 推送分享计数
 				err = promth.Push(*pushAddr, fmt.Sprintf("%s_shares_epoch_count", chain), chain, float64(shareCount))
 				if err != nil {
-					log.Printf("Failed to push share epoch count for chain %s, epoch %d: %v", chain, epoch, err)
+					log.Printf("Error pushing share count for chain %s, epoch %d: %v\n", chain, epoch, err)
 				}
 			}
 
-			// 推送最新不为零的分享数
-			if maxEpoch, exists := maxHeights[chain]; exists {
-				if latestShareCount, exists := epochs[maxEpoch]; exists && latestShareCount > 0 {
-					err = promth.Push(*pushAddr, fmt.Sprintf("%s_shares_latest_nonzero", chain), chain, float64(latestShareCount))
-					if err != nil {
-						log.Printf("Failed to push latest non-zero share count for chain %s: %v", chain, err)
-					}
+			// 推送 shares_latest_nonzero
+			if maxHeight > 0 {
+				err = promth.Push(*pushAddr, fmt.Sprintf("%s_shares_latest_nonzero", chain), chain, float64(maxHeight))
+				if err != nil {
+					log.Printf("Error pushing latest non-zero share count for chain %s: %v\n", chain, err)
 				}
 			}
 		}
 
-		// 等待下一个检查周期
+		// 等待指定时间间隔后再次执行
 		time.Sleep(time.Minute * time.Duration(*interval))
 	}
 }
