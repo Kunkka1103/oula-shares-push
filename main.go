@@ -218,13 +218,12 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 			sharesEpochCount.WithLabelValues(ce.Chain).Set(float64(shareCount))
 
 			// 定义唯一的 job 和 instance
-			job := fmt.Sprintf("shares_monitor_%s_epoch_%d", ce.Chain, epoch)
-			instance := fmt.Sprintf("epoch_%d", epoch)
+			job := fmt.Sprintf("%s_shares_monitor_epoch", ce.Chain)
+			//instance := fmt.Sprintf("epoch_%d", epoch)
 
 			// 推送到 Pushgateway
 			err = push.New(pushGW, job).
 				Collector(sharesEpochCount).
-				Grouping("instance", instance).
 				Push()
 			if err != nil {
 				log.Printf("Failed to push shares_epoch_count for chain=%s, epoch=%d: %v", ce.Chain, epoch, err)
