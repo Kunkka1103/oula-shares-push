@@ -194,13 +194,11 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 			gaugeLatest.Set(float64(latestShareCount))
 
 			// 定义唯一的 job 和 instance
-			job := fmt.Sprintf("shares_monitor_%s_latest_nonzero", ce.Chain)
-			instance := fmt.Sprintf("latest_epoch_%d", end)
+			job := ce.Chain
 
 			// 推送到 Pushgateway
 			err = push.New(pushGW, job).
 				Collector(gaugeLatest).
-				Grouping("instance", instance).
 				Push()
 			if err != nil {
 				log.Printf("Failed to push shares_latest_nonzero for chain=%s, epoch=%d: %v", ce.Chain, end, err)
@@ -233,13 +231,11 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 			gaugeEpoch.Set(float64(shareCount))
 
 			// 定义唯一的 job 和 instance
-			job := fmt.Sprintf("shares_monitor_%s_epoch_%d", ce.Chain, epoch)
-			instance := fmt.Sprintf("epoch_%d", epoch)
+			job := ce.Chain
 
 			// 推送到 Pushgateway
 			err = push.New(pushGW, job).
 				Collector(gaugeEpoch).
-				Grouping("instance", instance).
 				Push()
 			if err != nil {
 				log.Printf("Failed to push shares_epoch_count for chain=%s, epoch=%d: %v", ce.Chain, epoch, err)
