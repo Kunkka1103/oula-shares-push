@@ -21,28 +21,28 @@ var (
 	intervalMins = flag.Int("interval", 5, "Check interval in minutes")
 )
 
-// Metrics定义
-//var (
-//	sharesEpochCount = prometheus.NewGaugeVec(
-//		prometheus.GaugeOpts{
-//			Name: "shares_epoch_count",
-//			Help: "Number of shares per epoch",
-//		},
-//		[]string{"chain"},
-//	)
-//	sharesLatestNonZero = prometheus.NewGaugeVec(
-//		prometheus.GaugeOpts{
-//			Name: "shares_latest_nonzero",
-//			Help: "Share count of the latest epoch if not zero",
-//		},
-//		[]string{"chain"},
-//	)
-//)
+// Metrics定义（保持不变）
+var (
+	sharesEpochCount = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "shares_epoch_count",
+			Help: "Number of shares per epoch",
+		},
+		[]string{"chain"},
+	)
+	sharesLatestNonZero = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "shares_latest_nonzero",
+			Help: "Share count of the latest epoch if not zero",
+		},
+		[]string{"chain"},
+	)
+)
 
-//func init() {
-//	prometheus.MustRegister(sharesEpochCount)
-//	prometheus.MustRegister(sharesLatestNonZero)
-//}
+func init() {
+	prometheus.MustRegister(sharesEpochCount)
+	prometheus.MustRegister(sharesLatestNonZero)
+}
 
 func main() {
 	flag.Parse()
@@ -151,6 +151,9 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 		return fmt.Errorf("rows iteration error: %w", err)
 	}
 
+	// 创建一个自定义的注册表
+	registry := prometheus.NewRegistry()
+
 	// 遍历每个链
 	for _, ce := range chains {
 		lastEpoch, exists := lastPushed[ce.Chain]
@@ -181,32 +184,18 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 			latestShareCount = 0
 		}
 
-		// 如果最新 epoch 的 share_count !=0，推送 shares_latest_nonzero
+		// 定义并注册 shares_latest_nonzero
 		if latestShareCount != 0 {
-			// 设置 shares_latest_nonzero
+			metricName := fmt.Sprintf("%s_shares_latest_nonzero", ce.Chain)
 			gaugeLatest := prometheus.NewGauge(prometheus.GaugeOpts{
-				Name:        fmt.Sprintf("%s_shares_latest_nonzero", ce.Chain),
-				Help:        "Share count of the latest epoch if not zero",
-				//ConstLabels: prometheus.Labels{},
+				Name: metricName,
+				Help: "Share count of the latest epoch if not zero",
 			})
 			gaugeLatest.Set(float64(latestShareCount))
-
-			// 定义唯一的 job
-			job := ce.Chain
-
-			// 推送到 Pushgateway
-			err = push.New(pushGW, job).
-				Collector(gaugeLatest).
-				Push()
-			if err != nil {
-				log.Printf("Failed to push shares_latest_nonzero for chain=%s, epoch=%d: %v", ce.Chain, end, err)
-				continue
-			}
-
-			log.Printf("Pushed shares_latest_nonzero for chain=%s, epoch=%d: %d", ce.Chain, end, latestShareCount)
+			registry.MustRegister(gaugeLatest)
 		}
 
-		// 遍历范围内的每个 epoch 并推送 shares_epoch_count
+		// 遍历范围内的每个 epoch并注册 shares_epoch_count
 		for epoch := start; epoch <= end; epoch++ {
 			shareCount, exists := shareCounts[epoch]
 			if !exists {
@@ -218,33 +207,40 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 				continue
 			}
 
-			// 设置 shares_epoch_count
+			metricName := fmt.Sprintf("%s_shares_epoch_count", ce.Chain)
 			gaugeEpoch := prometheus.NewGauge(prometheus.GaugeOpts{
-				Name:        fmt.Sprintf("%s_shares_epoch_count", ce.Chain),
-				Help:        "Number of shares per epoch",
-				//ConstLabels: prometheus.Labels{},
+				Name: metricName,
+				Help: "Number of shares per epoch",
 			})
 			gaugeEpoch.Set(float64(shareCount))
-
-			// 定义唯一的 job
-			job := ce.Chain
-
-			// 推送到 Pushgateway
-			err = push.New(pushGW, job).
-				Collector(gaugeEpoch).
-				Push()
-			if err != nil {
-				log.Printf("Failed to push shares_epoch_count for chain=%s, epoch=%d: %v", ce.Chain, epoch, err)
-				continue
-			}
-
-			log.Printf("Pushed shares_epoch_count for chain=%s, epoch=%d: %d", ce.Chain, epoch, shareCount)
+			registry.MustRegister(gaugeEpoch)
 
 			// 更新 lastPushed
 			lastPushed[ce.Chain] = epoch
 		}
 	}
 
+	// 检查是否有需要推送的指标
+	metrics, err := registry.Gather()
+	if err != nil {
+		return fmt.Errorf("failed to gather metrics: %w", err)
+	}
+	if len(metrics) == 0 {
+		log.Println("No new metrics to push.")
+		return nil
+	}
+
+	// 定义唯一的 job 名称，这里保持为 "chain"
+	pusher := push.New(pushGW, "chain").
+		Gatherer(registry)
+
+	// 推送到 Pushgateway
+	err = pusher.Push()
+	if err != nil {
+		return fmt.Errorf("failed to push metrics: %w", err)
+	}
+
+	log.Println("Successfully pushed metrics to Pushgateway")
 	return nil
 }
 
