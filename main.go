@@ -28,12 +28,6 @@ func main() {
 	}
 	defer db.Close()
 
-	// 获取每个链的最大不为零的高度
-	maxHeights, err := dal.GetMaxShareHeight(db)
-	if err != nil {
-		log.Panicln("Failed to get max share heights:", err)
-	}
-
 	// 定期检查并推送数据
 	for {
 		// 获取链的分享计数
@@ -46,32 +40,18 @@ func main() {
 
 		// 推送每个链的分享计数
 		for chain, epochs := range shareCounts {
-			// 获取最大不为零的高度
-			maxEpoch, ok := maxHeights[chain]
-			if !ok {
-				log.Printf("Chain %s has no max height record", chain)
-				continue
-			}
-
-			// 推送 shares_latest_nonzero
-			latestShareCount := epochs[maxEpoch]
-			if latestShareCount != 0 {
-				err = promth.Push(*pushAddr, fmt.Sprintf("%s_shares_latest_nonzero", chain), chain, float64(latestShareCount))
-				if err != nil {
-					log.Printf("Failed to push latest share count for %s: %v", chain, err)
-				}
-			}
-
-			// 推送每个 epoch 的分享计数
+			// 推送每个链的 epoch_count
 			for epoch, shareCount := range epochs {
-				err = promth.Push(*pushAddr, fmt.Sprintf("%s_shares_epoch_count", chain), chain, float64(shareCount))
+				err := promth.Push(*pushAddr, fmt.Sprintf("%s_shares_epoch_count", chain), chain, float64(shareCount))
 				if err != nil {
-					log.Printf("Failed to push epoch count for %s, epoch %d: %v", chain, epoch, err)
+					log.Println("Error pushing share count:", err)
+					continue
 				}
+				log.Printf("Pushed share count for chain: %s, epoch: %d, shareCount: %d\n", chain, epoch, shareCount)
 			}
 		}
 
-		// 等待下次检查
+		// 睡眠一段时间后继续检查
 		time.Sleep(time.Minute * time.Duration(*interval))
 	}
 }
