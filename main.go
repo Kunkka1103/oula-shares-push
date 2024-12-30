@@ -181,18 +181,26 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 			latestShareCount = 0
 		}
 
-		// 如果最新 epoch 的 share_count !=0，推送
+		// 如果最新 epoch 的 share_count !=0，推送 shares_latest_nonzero
 		if latestShareCount != 0 {
 			// 设置 shares_latest_nonzero
-			sharesLatestNonZero.WithLabelValues(ce.Chain).Set(float64(latestShareCount))
+			gaugeLatest := prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "shares_latest_nonzero",
+				Help: "Share count of the latest epoch if not zero",
+				ConstLabels: prometheus.Labels{
+					"chain": ce.Chain,
+				},
+			})
+			gaugeLatest.Set(float64(latestShareCount))
 
 			// 定义唯一的 job 和 instance
 			job := fmt.Sprintf("shares_monitor_%s_latest_nonzero", ce.Chain)
-			//instance := fmt.Sprintf("latest_epoch_%d", end)
+			instance := fmt.Sprintf("latest_epoch_%d", end)
 
 			// 推送到 Pushgateway
 			err = push.New(pushGW, job).
-				Collector(sharesLatestNonZero).
+				Collector(gaugeLatest).
+				Grouping("instance", instance).
 				Push()
 			if err != nil {
 				log.Printf("Failed to push shares_latest_nonzero for chain=%s, epoch=%d: %v", ce.Chain, end, err)
@@ -202,7 +210,7 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 			log.Printf("Pushed shares_latest_nonzero for chain=%s, epoch=%d: %d", ce.Chain, end, latestShareCount)
 		}
 
-		// 遍历范围内的每个 epoch 并推送 share_count
+		// 遍历范围内的每个 epoch 并推送 shares_epoch_count
 		for epoch := start; epoch <= end; epoch++ {
 			shareCount, exists := shareCounts[epoch]
 			if !exists {
@@ -215,15 +223,23 @@ func pushUpdatedShareCounts(db *sql.DB, pushGW string, lastPushed map[string]int
 			}
 
 			// 设置 shares_epoch_count
-			sharesEpochCount.WithLabelValues(ce.Chain).Set(float64(shareCount))
+			gaugeEpoch := prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: "shares_epoch_count",
+				Help: "Number of shares per epoch",
+				ConstLabels: prometheus.Labels{
+					"chain": ce.Chain,
+				},
+			})
+			gaugeEpoch.Set(float64(shareCount))
 
 			// 定义唯一的 job 和 instance
-			job := fmt.Sprintf("%s_shares_monitor_epoch", ce.Chain)
-			//instance := fmt.Sprintf("epoch_%d", epoch)
+			job := fmt.Sprintf("shares_monitor_%s_epoch_%d", ce.Chain, epoch)
+			instance := fmt.Sprintf("epoch_%d", epoch)
 
 			// 推送到 Pushgateway
 			err = push.New(pushGW, job).
-				Collector(sharesEpochCount).
+				Collector(gaugeEpoch).
+				Grouping("instance", instance).
 				Push()
 			if err != nil {
 				log.Printf("Failed to push shares_epoch_count for chain=%s, epoch=%d: %v", ce.Chain, epoch, err)
