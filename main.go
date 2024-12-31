@@ -134,7 +134,7 @@ func pushShareCount(pushAddr, chain string, shareCount float64) error {
 	gauge.Set(shareCount)
 
 	// 只使用 job 标签
-	err := push.New(pushAddr, fmt.Sprintf("job=%s", chain)).
+	err := push.New(pushAddr, fmt.Sprintf("%s", chain)).
 		Collector(gauge).
 		Push()
 	return err
