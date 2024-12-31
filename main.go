@@ -36,38 +36,50 @@ func main() {
 
 	// 定期检查并推送数据
 	for {
-		// 获取每个链的当前最大高度
-		heights, err := getMaxHeights(db)
+		// 获取每个链的最大高度
+		shareCounts, err := getShareCounts(db)
 		if err != nil {
-			log.Println("Error getting max heights:", err)
+			log.Println("Error getting share counts:", err)
 			time.Sleep(time.Minute * time.Duration(*interval))
 			continue
 		}
 
-		// 对每个链进行处理
-		for chain, maxHeight := range heights {
-			// 检查是否需要推送
-			if lastHeight, ok := lastHeights[chain]; !ok || maxHeight > lastHeight {
-				// 如果链的高度更新，推送新的 share_count 数据
-				if lastHeight > 0 {
-					// 推送从上次高度+1 到当前高度的所有 share_count
-					err = pushShareCounts(db, chain, lastHeight+1, maxHeight)
+		// 推送每个链的分享计数
+		for chain, maxHeight := range shareCounts {
+			// 如果链的高度有变化，推送新的数据
+			if lastHeight, exists := lastHeights[chain]; exists && maxHeight > lastHeight {
+				// 推送从 lastHeight + 1 到 maxHeight 之间的所有高度
+				for epoch := lastHeight + 1; epoch <= maxHeight; epoch++ {
+					shareCount, err := getShareCountForEpoch(db, chain, epoch)
 					if err != nil {
-						log.Printf("Error pushing share counts for %s: %v\n", chain, err)
+						log.Println("Error fetching share count for chain", chain, "epoch", epoch, ":", err)
+						continue
 					}
+
+					// 推送 share_count 数据
+					err = pushShareCount(*pushAddr, chain, float64(shareCount))
+					if err != nil {
+						log.Println("Error pushing share count for chain", chain, "epoch", epoch, ":", err)
+						continue
+					}
+
+					log.Printf("Pushed share count for chain %s, epoch %d: %d\n", chain, epoch, shareCount)
+
+					// 每次推送之后等待 `interval` 时间
+					time.Sleep(time.Minute * time.Duration(*interval))
 				}
-				// 更新最后的高度
-				lastHeights[chain] = maxHeight
 			}
+
+			// 更新链的最新高度
+			lastHeights[chain] = maxHeight
 		}
 
-		// 等待指定的时间间隔
-		log.Printf("Waiting for %d minutes before checking again...\n", *interval)
+		// 等待下一轮检查
 		time.Sleep(time.Minute * time.Duration(*interval))
 	}
 }
 
-// 初始化数据库连接
+// initDB 初始化 MySQL 连接
 func initDB(DSN string) (*sql.DB, error) {
 	db, err := sql.Open("mysql", DSN)
 	if err != nil {
@@ -79,71 +91,51 @@ func initDB(DSN string) (*sql.DB, error) {
 		return nil, err
 	}
 
-	log.Println("Database connection established successfully.")
 	return db, nil
 }
 
-// 获取每个链的最大高度
-func getMaxHeights(db *sql.DB) (map[string]int64, error) {
+// getShareCounts 获取每个链的最大高度
+func getShareCounts(db *sql.DB) (map[string]int64, error) {
 	rows, err := db.Query("SELECT chain, MAX(epoch) FROM shares_epoch_counts GROUP BY chain")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	heights := make(map[string]int64)
+	shareCounts := make(map[string]int64)
 	for rows.Next() {
 		var chain string
-		var maxHeight int64
-		if err := rows.Scan(&chain, &maxHeight); err != nil {
+		var maxEpoch int64
+		if err := rows.Scan(&chain, &maxEpoch); err != nil {
 			return nil, err
 		}
-		heights[chain] = maxHeight
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
+		shareCounts[chain] = maxEpoch
 	}
 
-	return heights, nil
+	return shareCounts, nil
 }
 
-// 获取并推送链的分享计数数据
-func pushShareCounts(db *sql.DB, chain string, startEpoch, endEpoch int64) error {
-	// 查询从 startEpoch 到 endEpoch 之间的所有 share_count 数据
-	rows, err := db.Query("SELECT epoch, share_count FROM shares_epoch_counts WHERE chain = ? AND epoch BETWEEN ? AND ?", chain, startEpoch, endEpoch)
+// getShareCountForEpoch 获取指定链和指定 epoch 的 share_count
+func getShareCountForEpoch(db *sql.DB, chain string, epoch int64) (int64, error) {
+	var shareCount int64
+	err := db.QueryRow("SELECT share_count FROM shares_epoch_counts WHERE chain = ? AND epoch = ?", chain, epoch).Scan(&shareCount)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	defer rows.Close()
+	return shareCount, nil
+}
 
-	// 为该链创建一个指标
-	gauge := prometheus.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: fmt.Sprintf("%s_shares_count", chain),
-			Help: "Number of shares for each epoch",
-		},
-		[]string{"epoch"},
-	)
+// pushShareCount 推送指标到 Pushgateway
+func pushShareCount(pushAddr, chain string, shareCount float64) error {
+	gauge := prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: fmt.Sprintf("%s_shares_count", chain),
+		Help: fmt.Sprintf("Share count for chain %s", chain),
+	})
+	gauge.Set(shareCount)
 
-	// 遍历每行数据，设置相应的 share_count
-	for rows.Next() {
-		var epoch int64
-		var shareCount int64
-		if err := rows.Scan(&epoch, &shareCount); err != nil {
-			return err
-		}
-		// 设置指标值
-		gauge.WithLabelValues(fmt.Sprintf("%d", epoch)).Set(float64(shareCount))
-	}
-
-	// 推送数据到 Pushgateway
-	err = push.New(*pushAddr, chain).
+	// 只使用 job 标签
+	err := push.New(pushAddr, fmt.Sprintf("job=%s", chain)).
 		Collector(gauge).
 		Push()
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Successfully pushed share counts for chain: %s from epoch %d to %d\n", chain, startEpoch, endEpoch)
-	return nil
+	return err
 }
