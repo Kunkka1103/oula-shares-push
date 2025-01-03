@@ -122,7 +122,9 @@ func pushShareCount(pushAddr, chain string, shareCount int64) error {
 	gauge.Set(float64(shareCount))
 
 	// 推送指标
-	err := push.New(pushAddr, chain).Collector(gauge).Push()
+	err := push.New(pushAddr, chain).
+		Grouping("instance", "localhost").
+		Collector(gauge).Push()
 	if err != nil {
 		return err
 	}
