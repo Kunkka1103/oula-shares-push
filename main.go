@@ -101,7 +101,7 @@ func getShareCounts(db *sql.DB) (map[string]int, error) {
 	log.Println("Fetching share counts from the database...")
 	shareCounts := make(map[string]int)
 
-	rows, err := db.Query("SELECT chain, epoch_count FROM share_counts")
+	rows, err := db.Query("SELECT chain, epoch_count FROM shares_epoch_counts")
 	if err != nil {
 		return nil, fmt.Errorf("failed to query share counts: %w", err)
 	}
