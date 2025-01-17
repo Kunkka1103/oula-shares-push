@@ -6,144 +6,136 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
 var (
-	opsDSN     = flag.String("opsDsn", "", "MySQL DSN, e.g. user:password@tcp(host:3306)/ops_db")
-	outputPath = flag.String("output-path", "/opt/node-exporter/prom/", "Directory to write .prom files")
-	interval   = flag.Int("interval", 5, "Check interval in minutes")
+	opsDSN    = flag.String("opsDsn", "", "MySQL DSN, e.g. user:password@tcp(host:3306)/ops_db")
+	interval  = flag.Int("interval", 5, "Check interval in minutes")
+	outputDir = flag.String("output-dir", "/opt/node-exporter/prom", "Directory to write Prometheus metric files")
 )
 
 func main() {
+	// 解析命令行标志
 	flag.Parse()
-	if *opsDSN == "" || *outputPath == "" {
-		log.Panicln("Both MySQL DSN and output-path parameters are required.")
+
+	// 校验 DSN
+	if *opsDSN == "" {
+		log.Panicln("mysqlDSN is required.")
 	}
 
-	// Check if output path exists
-	if err := ensureOutputPath(*outputPath); err != nil {
-		log.Panicln("Failed to check output path:", err)
-	}
-
-	// Initialize MySQL connection
+	// 初始化数据库连接
 	db, err := initDB(*opsDSN)
 	if err != nil {
-		log.Panicln("Failed to connect to MySQL:", err)
+		log.Panicln("无法连接到数据库:", err)
 	}
+	// main 函数退出前关闭数据库连接
 	defer db.Close()
 
-	// Periodically check and write metrics
+	// 定期检查并推送数据
 	for {
-		// Get the latest share counts from the database
+		// 从数据库获取各个链的最新分享计数
 		shareCounts, err := getShareCounts(db)
 		if err != nil {
-			log.Println("Error fetching share counts:", err)
-			log.Println("Retrying in", *interval, "minutes...")
+			log.Println("获取 share counts 时发生错误:", err)
 			time.Sleep(time.Minute * time.Duration(*interval))
 			continue
 		}
 
-		// Write each chain's share count to a .prom file
+		// 推送每个链的最新分享计数
 		for chain, epochCount := range shareCounts {
-			err = writeMetricToFile(*outputPath, chain, epochCount)
-			if err != nil {
-				log.Printf("Error writing metric for %s: %v\n", chain, err)
+			// 构建文件路径
+			filePath := fmt.Sprintf("%s/%s.prom", *outputDir, chain)
+			log.Printf("正在写入指标数据到 %s", filePath)
+
+			// 使用封装好的函数写文件
+			if err := writeToPromFile(filePath, chain, epochCount); err != nil {
+				log.Printf("写入文件 %s 时出错: %v", filePath, err)
 			} else {
-				log.Printf("Successfully wrote metric for %s: %d\n", chain, epochCount)
+				log.Printf("成功写入到 %s", filePath)
 			}
 		}
 
-		// Wait before the next check
-		log.Println("Waiting for the next check...")
+		// 等待下次轮询
 		time.Sleep(time.Minute * time.Duration(*interval))
 	}
 }
 
-// initDB initializes the MySQL connection
-func initDB(dsn string) (*sql.DB, error) {
-	log.Println("Connecting to MySQL...")
-	db, err := sql.Open("mysql", dsn)
+// 初始化 MySQL 连接
+func initDB(DSN string) (*sql.DB, error) {
+	db, err := sql.Open("mysql", DSN)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open MySQL connection: %w", err)
+		return nil, err
 	}
-
-	// Check if connection is successful
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("failed to ping MySQL: %w", err)
+	err = db.Ping()
+	if err != nil {
+		return nil, err
 	}
-
-	log.Println("Successfully connected to MySQL.")
 	return db, nil
 }
 
-// ensureOutputPath ensures that the output path exists
-func ensureOutputPath(path string) error {
-	// Check if the directory exists
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		log.Printf("Output path does not exist: %s\n", path)
-		// Try to create the directory
-		if err := os.MkdirAll(path, 0755); err != nil {
-			return fmt.Errorf("failed to create directory: %w", err)
-		}
-		log.Printf("Output path created: %s\n", path)
-	} else {
-		log.Printf("Output path already exists: %s\n", path)
-	}
-	return nil
-}
-
-// getShareCounts fetches the share counts for each chain from the database
-func getShareCounts(db *sql.DB) (map[string]int, error) {
-	log.Println("Fetching share counts from the database...")
-	shareCounts := make(map[string]int)
-
-	rows, err := db.Query("SELECT chain, epoch_count FROM shares_epoch_counts")
+// 获取每个链的最新分享计数
+func getShareCounts(db *sql.DB) (map[string]int64, error) {
+	rows, err := db.Query("SELECT chain, MAX(epoch) AS latest_epoch FROM shares_epoch_counts GROUP BY chain")
 	if err != nil {
-		return nil, fmt.Errorf("failed to query share counts: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
 
+	shareCounts := make(map[string]int64)
+
 	for rows.Next() {
 		var chain string
-		var epochCount int
-		if err := rows.Scan(&chain, &epochCount); err != nil {
-			return nil, fmt.Errorf("failed to scan row: %w", err)
+		var latestEpoch int64
+		if err := rows.Scan(&chain, &latestEpoch); err != nil {
+			return nil, err
 		}
-		shareCounts[chain] = epochCount
+		// 查询该链的最新高度的 share_count
+		count, err := getShareCountAtEpoch(db, chain, latestEpoch)
+		if err != nil {
+			log.Printf("Error getting share count for chain %s at epoch %d: %v", chain, latestEpoch, err)
+			continue
+		}
+		shareCounts[chain] = count
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("error iterating rows: %w", err)
+		return nil, err
 	}
 
-	log.Println("Share counts fetched successfully.")
 	return shareCounts, nil
 }
 
-// writeMetricToFile writes the metrics to a .prom file
-func writeMetricToFile(path, chain string, epochCount int) error {
-	// Prepare the metric content
-	metricContent := fmt.Sprintf("%s{chain=\"%s\"} %d\n", chain, chain, epochCount)
-
-	// Define the file path
-	filePath := filepath.Join(path, fmt.Sprintf("%s.prom", chain))
-
-	// Open the file for writing
-	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+// 获取指定链在指定 epoch 高度的 share_count
+func getShareCountAtEpoch(db *sql.DB, chain string, epoch int64) (int64, error) {
+	var shareCount int64
+	err := db.QueryRow("SELECT share_count FROM shares_epoch_counts WHERE chain = ? AND epoch = ?", chain, epoch).Scan(&shareCount)
 	if err != nil {
-		return fmt.Errorf("failed to open or create file %s: %w", filePath, err)
+		return 0, err
 	}
+	return shareCount, nil
+}
+
+// 封装好的函数，用于写入 Prometheus 格式的数据到文件
+func writeToPromFile(filePath, chain string, epochCount int64) error {
+	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return fmt.Errorf("无法打开文件 %s: %v", filePath, err)
+	}
+	// defer 放在函数中，这样函数返回时就会关闭文件
 	defer file.Close()
 
-	// Write the metric to the file
-	if _, err := file.WriteString(metricContent); err != nil {
-		return fmt.Errorf("failed to write to file %s: %w", filePath, err)
+	// 写入 Prometheus 指标数据
+	_, err = fmt.Fprintf(
+		file,
+		"%s_shares_count{instance=\"jumperserver\",job=\"%s\"} %d\n",
+		chain, chain, epochCount,
+	)
+	if err != nil {
+		return fmt.Errorf("写入文件 %s 时发生错误: %v", filePath, err)
 	}
 
-	log.Printf("Successfully wrote metric for %s to %s\n", chain, filePath)
 	return nil
 }
