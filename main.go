@@ -47,7 +47,7 @@ func main() {
 		// 推送每个链的最新分享计数
 		for chain, epochCount := range shareCounts {
 			// 构建文件路径
-			filePath := fmt.Sprintf("%s/%s.prom", *outputDir, chain)
+			filePath := fmt.Sprintf("%s/%s_shares_count.prom", *outputDir, chain)
 			log.Printf("正在写入指标数据到 %s", filePath)
 
 			// 使用封装好的函数写文件
