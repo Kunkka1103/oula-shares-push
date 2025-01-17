@@ -120,14 +120,12 @@ func getShareCountAtEpoch(db *sql.DB, chain string, epoch int64) (int64, error) 
 
 // 封装好的函数，用于写入 Prometheus 格式的数据到文件
 func writeToPromFile(filePath, chain string, epochCount int64) error {
-	file, err := os.OpenFile(filePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(filePath, os.O_TRUNC|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("无法打开文件 %s: %v", filePath, err)
 	}
-	// defer 放在函数中，这样函数返回时就会关闭文件
 	defer file.Close()
 
-	// 写入 Prometheus 指标数据
 	_, err = fmt.Fprintf(
 		file,
 		"%s_shares_count{instance=\"jumperserver\",job=\"%s\"} %d\n",
